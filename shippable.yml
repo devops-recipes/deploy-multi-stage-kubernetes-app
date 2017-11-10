@@ -1,0 +1,165 @@
+resources:
+# resources for the provision-gke-kubernetes-cluster app
+  - name: dmsk_img
+    type: image
+    integration: drship_gcloud    #replace with your Google Cloud integration name
+    pointer:
+      sourceName: "gcr.io/fair-future-183201/node_app"
+    seed:
+      versionName: "master.1"
+
+  - name: dmsk_test_opts
+    type: dockerOptions
+    version:
+      memory: 1024
+      portMappings:
+        - 80:80
+
+  - name: dmsk_prod_opts
+    type: dockerOptions
+    version:
+      memory: 2048
+      portMappings:
+        - 80:80
+
+  - name: dmsk_test_env
+    type: params
+    version:
+      params:
+        ENVIRONMENT: "test"
+
+  - name: dmsk_prod_env
+    type: params
+    version:
+      params:
+        ENVIRONMENT: "prod"
+
+  - name: dmsk_test_replicas
+    type: replicas
+    version:
+      count: 1
+
+  - name: dmsk_prod_replicas
+    type: replicas
+    version:
+      count: 1
+
+ # Version resource
+  - name: dmsk_prod_release_version
+    type: version
+    seed:
+      versionName: "1.0.0"
+
+  # GitHub repo holding scripts to be used in runsh pipeline job
+  - name: dmsk_gitRepo
+    type: gitRepo
+    integration: dr_github # replace with your GitHub integration name
+    pointer:
+      # replace with source code location (e.g. GitHub) where you cloned this
+      # sample project.
+      sourceName: devops-recipes/deploy-multi-stage-kubernetes-app
+      branch: master
+
+  # config for GKE CLI
+  - name: dmsk_cliConfig
+    type: cliConfig
+    integration: drship_gcloud     #replace with your Google Cloud integration name
+    pointer:
+      region: us-central1-b
+
+  # GKE cluster resources
+  - name: dmsk_test_cluster
+    type: cluster
+    integration: drship_gcloud    #replace with your Google Cloud integration name
+    pointer:
+      sourceName: "dmsk-test-cluster"
+      region: us-central1-b
+      namespace: "dmsk-test-environment"
+
+  - name: dmsk_prod_cluster
+    type: cluster
+    integration: drship_gcloud    #replace with your Google Cloud integration name
+    pointer:
+      sourceName: "dmsk-prod-cluster"
+      region: us-central1-a
+      namespace: "dmsk-prod-environment"
+
+  - name: dmsk_app_trigger
+    type: trigger
+    version:
+      # update counter to trigger the workflow
+      counter: 2
+
+
+jobs:
+# jobs for the provision-gke-kubernetes-cluster dmsk
+
+#  Job that creates the application definition
+  - name: dmsk_service_def
+    type: manifest
+    steps:
+     - IN: dmsk_img
+     - IN: dmsk_prod_opts
+     - IN: dmsk_prod_env
+
+  # Job that provisions the GKE test cluster
+  - name: dmsk_provision_test_cluster_job
+    type: runSh
+    steps:
+      - IN: dmsk_service_def
+      - IN: dmsk_gitRepo
+      - IN: dmsk_cliConfig
+        scopes:
+          - gke
+      - IN: dmsk_test_cluster
+      - IN: dmsk_app_trigger
+      - TASK:
+        # invoke a script that provisions the GKE cluster named test-cluster
+        - script: . $DMSK_GITREPO_PATH/gitRepo/provision_gke_cluster.sh $DMSK_TEST_CLUSTER_POINTER_SOURCENAME $DMSK_TEST_CLUSTER_POINTER_REGION
+
+  # Job that deploys to test environment
+  - name: dmskTestDeploy
+    method: replace
+    type: deploy
+    steps:
+      - IN: dmsk_provision_test_cluster_job
+      - IN: dmsk_test_replicas
+      - IN: dmsk_test_opts
+      - IN: dmsk_test_env
+      - IN: dmsk_test_cluster
+      - IN: dmsk_service_def
+
+  # Job that deprovisions the GKE cluster
+  - name: dmsk_deprovision_test_cluster_job
+    type: runSh
+    steps:
+      - IN: dmsk_gitRepo
+        switch: off
+      - IN: dmsk_cliConfig
+        scopes:
+          - gke
+      - IN: dmskTestDeploy
+      - IN: dmsk_test_cluster
+      - TASK:
+        # invoke a script that deprovisions the GKE cluster named test-cluster
+        # $GKE_CLICONFIG_POINTER_REGION is an environment variable that is automatically created and injected
+        # by the gke_cliConfig resource and points to the availability zone.
+        - script: . $DMSK_GITREPO_PATH/gitRepo/deprovision_gke_cluster.sh $DMSK_TEST_CLUSTER_POINTER_SOURCENAME $DMSK_TEST_CLUSTER_POINTER_REGION $DMSK_TEST_CLUSTER_POINTER_NAMESPACE
+
+  # Release job
+  - name: dmsk_release
+    type: release
+    bump: minor
+    steps:
+      - IN: dmsk_prod_release_version
+      - IN: dmsk_service_def
+      - IN: dmsk_deprovision_test_cluster_job
+
+  # Job that Job that deploys to prod environment
+  - name: dmskProdDeploy
+    method: replace
+    type: deploy
+    steps:
+      - IN: dmsk_release
+      - IN: dmsk_prod_cluster
+      - IN: dmsk_prod_replicas
